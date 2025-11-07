@@ -8,8 +8,12 @@ import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient 
+import android.webkit.ValueCallback 
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher 
+import androidx.activity.result.contract.ActivityResultContracts 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -22,16 +26,15 @@ import com.app.nearil.ui.theme.NEARilTheme
 // Tag for logging deep link data
 private const val TAG = "MainActivity"
 
-// 1. Define the domains you MUST open externally in a proper browser (to avoid Error 403)
+// 1. Define the domains you MUST open externally in a proper browser (ONLY GOOGLE)
 private val OAUTH_HOSTS = listOf(
-    "accounts.google.com",  // Google's sign-in host
-    "accounts.facebook.com"
+    "accounts.google.com" // Google's sign-in host
 )
 
 // 2. Define the Custom URI Scheme from your Rails HTML fallback
 private const val DEEP_LINK_SCHEME = "nearilappscheme"
 private const val APP_LINK_HOST = "nearil.com"
-// CRITICAL FIX: The path must match the actual redirect URL path from your web app.
+// The path must match the actual redirect URL path from your web app.
 private const val AUTH_SUCCESS_PATH = "/app_auth_complete"
 
 class MainActivity : ComponentActivity() {
@@ -43,7 +46,42 @@ class MainActivity : ComponentActivity() {
     // Property to hold a URI if it arrives before the WebView is ready.
     private var pendingDeepLinkUri: Uri? = null
 
+    // --- File Upload/Camera Variables ---
+    // Callback to send the selected file(s) URI back to the WebView
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    
+    // Modern way to handle Activity Results (replaces onActivityResult)
+    private lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+    // ------------------------------------
+
     override fun onCreate(savedInstanceState: Bundle?) {
+
+        // --- File Chooser Launcher Registration (MUST be done before super.onCreate) ---
+        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            // This logic handles the result from the file chooser intent
+            var results: Array<Uri>? = null
+
+            // Check if the result is OK and data exists
+            if (result.resultCode == RESULT_OK) {
+                result.data?.let { intent ->
+                    // Handle single file selection
+                    if (intent.dataString != null) {
+                        results = arrayOf(Uri.parse(intent.dataString))
+                    }
+                    // Handle multiple file selection (if supported by intent)
+                    else if (intent.clipData != null) {
+                        val count = intent.clipData!!.itemCount
+                        results = Array(count) { i -> intent.clipData!!.getItemAt(i).uri }
+                    }
+                }
+            }
+
+            // Deliver the result (even if null/canceled) back to the WebView
+            filePathCallback?.onReceiveValue(results)
+            filePathCallback = null // Clear the callback
+        }
+        // ------------------------------------
+
         super.onCreate(savedInstanceState)
 
         // Process the initial intent (may contain a deep link from the OAuth flow)
@@ -191,6 +229,9 @@ class MainActivity : ComponentActivity() {
                     )
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    // Allow file access for camera/gallery intents
+                    settings.allowFileAccess = true 
+                    settings.allowContentAccess = true
 
                     // 1. CRITICAL: Set a custom User-Agent string to help the Rails server reliably
                     // distinguish this request from a standard web browser request.
@@ -203,17 +244,60 @@ class MainActivity : ComponentActivity() {
                     val uriToLoad = pendingDeepLinkUri
 
                     if (uriToLoad != null) {
-                        // FIX: Changed uriToToLoad to uriToLoad
                         Log.i(TAG, "WebView initialized. Processing stored deep link: ${uriToLoad.toString()}")
-                        // FIX: Changed uriToToLoad to uriToLoad
                         processAuthDeepLink(uriToLoad)
                     } else {
                         // Load the initial URL of your website only if no deep link was pending
                         loadUrl(initialUrl)
                     }
+                    
+                    // --- Implement WebChromeClient for File/Camera Access ---
+                    webChromeClient = object : WebChromeClient() {
+                        
+                        // This method is called when the web page wants to open a file chooser
+                        override fun onShowFileChooser(
+                            webView: WebView?,
+                            filePathCallback: ValueCallback<Array<Uri>>?,
+                            fileChooserParams: FileChooserParams?
+                        ): Boolean {
+                            // 1. Check if there's already a pending callback (to prevent multiple choosers)
+                            if (this@MainActivity.filePathCallback != null) {
+                                this@MainActivity.filePathCallback!!.onReceiveValue(null)
+                                this@MainActivity.filePathCallback = null
+                            }
+
+                            // 2. Store the new callback
+                            this@MainActivity.filePathCallback = filePathCallback
+
+                            // 3. Create the Intent from the params provided by the WebView
+                            val intent = fileChooserParams?.createIntent()
+                            try {
+                                // 4. Launch the intent using the Activity Result Launcher
+                                fileChooserLauncher.launch(intent)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Cannot launch file chooser: ${e.message}")
+                                // If the launch fails, call the callback with null
+                                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                this@MainActivity.filePathCallback = null
+                                return false
+                            }
+
+                            return true // Indicate that we handled the file chooser request
+                        }
+
+                        // Also include onGeolocationPermissionsShowPrompt for completeness if location is ever needed
+                        override fun onGeolocationPermissionsShowPrompt(
+                            origin: String?,
+                            callback: android.webkit.GeolocationPermissions.Callback?
+                        ) {
+                            // NOTE: For production, you must implement a runtime permission check here.
+                            callback?.invoke(origin, true, false)
+                        }
+                    }
+                    // --- END WebChromeClient ---
 
 
-                    // 3. Implement the custom WebViewClient to intercept OAuth URLs
+                    // 3. Implement the custom WebViewClient to intercept OAuth URLs and App Links
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val url = request?.url.toString()
@@ -229,28 +313,67 @@ class MainActivity : ComponentActivity() {
                             if (url == null) return false
 
                             val uri = Uri.parse(url)
+                            val scheme = uri.scheme?.lowercase()
+                            val host = uri.host
 
-                            // 1. CRITICAL FIX: Intercept OmniAuth Passthru and Inject Query Parameter
-                            if (uri.host == APP_LINK_HOST && uri.path?.startsWith("/users/auth/") == true) {
-                                // We assume any path starting with /users/auth/ is an OmniAuth passthru.
-                                Log.i(TAG, "Intercepted OmniAuth Passthru: $url. INJECTING 'mobile_app=true'.")
+                            // 1. CRITICAL FIX: Intercept Facebook Sharer and force external opening using ACTION_SEND
+                            if (host != null && (host.contains("facebook.com") || host.contains("m.facebook.com")) && uri.path?.contains("/sharer/sharer.php") == true) {
+                                Log.i(TAG, "Intercepted Facebook Sharer URL: $url. Initiating ACTION_SEND.")
 
-                                // Build the new URL with the mobile_app=true flag
-                                val modifiedUri = uri.buildUpon()
-                                    .appendQueryParameter("mobile_app", "true")
-                                    .build()
+                                // Extract the URL to be shared from the 'u' query parameter
+                                val sharedUrl = uri.getQueryParameter("u")
 
-                                // Launch the external browser with the MODIFIED URL
-                                val intent = Intent(Intent.ACTION_VIEW, modifiedUri)
-                                view?.context?.startActivity(intent)
+                                if (sharedUrl != null) {
+                                    val sendIntent: Intent = Intent().apply {
+                                        action = Intent.ACTION_SEND
+                                        putExtra(Intent.EXTRA_TEXT, sharedUrl) // The link to share
+                                        type = "text/plain"
+                                    }
 
-                                // Return true to indicate we handled the navigation, preventing the WebView from loading the passthru
+                                    // Create a chooser so the user can pick the best app (e.g., Facebook, WhatsApp, etc.)
+                                    val shareIntent = Intent.createChooser(sendIntent, "Share Link")
+                                    view?.context?.startActivity(shareIntent)
+                                } else {
+                                    Log.w(TAG, "Facebook Sharer URL missing 'u' parameter. Falling back to ACTION_VIEW.")
+                                    // Fallback to simple ACTION_VIEW if we can't extract the share URL
+                                    val fallbackIntent = Intent(Intent.ACTION_VIEW, uri)
+                                    view?.context?.startActivity(fallbackIntent)
+                                }
+
+                                // Return true to indicate we handled the navigation
                                 return true
                             }
 
-                            // 2. Check if the host requires external opening (Google/Facebook OAuth login page)
-                            if (uri.host != null && OAUTH_HOSTS.any { uri.host!!.contains(it) }) {
-                                Log.i(TAG, "Intercepted OAuth URL: $url. Launching external browser.")
+                            // 2. CRITICAL FIX: Intercept WhatsApp share scheme and use ACTION_SEND for reliability
+                            if (scheme == "whatsapp") {
+                                Log.i(TAG, "Intercepted WhatsApp URL: $url. Initiating ACTION_SEND.")
+                                
+                                // Extract the text parameter (which contains the URL to be shared)
+                                val textToShare = uri.getQueryParameter("text")
+                                
+                                if (textToShare != null) {
+                                    val sendIntent: Intent = Intent().apply {
+                                        action = Intent.ACTION_SEND
+                                        putExtra(Intent.EXTRA_TEXT, textToShare) 
+                                        type = "text/plain"
+                                    }
+                                    
+                                    // Use Intent.createChooser to ensure the OS handles the intent and the user can pick WhatsApp
+                                    val shareIntent = Intent.createChooser(sendIntent, "Share via WhatsApp")
+                                    view?.context?.startActivity(shareIntent)
+                                } else {
+                                    Log.w(TAG, "WhatsApp URL missing 'text' parameter. Falling back to ACTION_VIEW.")
+                                    // Fallback: Use ACTION_VIEW which often resolves the whatsapp:// URI scheme directly
+                                    val fallbackIntent = Intent(Intent.ACTION_VIEW, uri)
+                                    view?.context?.startActivity(fallbackIntent)
+                                }
+                                
+                                return true // We handled the navigation
+                            }
+
+                            // 3. Check if the host requires external opening (Google OAuth login page)
+                            if (host != null && OAUTH_HOSTS.any { host.contains(it) }) {
+                                Log.i(TAG, "Intercepted Google OAuth URL: $url. Launching external browser.")
 
                                 val intent = Intent(Intent.ACTION_VIEW, uri)
                                 view?.context?.startActivity(intent)
@@ -259,8 +382,8 @@ class MainActivity : ComponentActivity() {
                                 return true
                             }
 
-                            // 3. CRITICAL FIX: App Link (HTTPS) Handoff Page
-                            if (uri.scheme == "https" && uri.host == APP_LINK_HOST && uri.path?.startsWith(AUTH_SUCCESS_PATH) == true) {
+                            // 4. CRITICAL FIX: App Link (HTTPS) Handoff Page
+                            if (scheme == "https" && host == APP_LINK_HOST && uri.path?.startsWith(AUTH_SUCCESS_PATH) == true) {
                                 Log.i(TAG, "Intercepted verified App Link URL: $url. Handing off to Android OS resolver.")
 
                                 // Launch the App Link URL as a new Intent to trigger the App Link resolver
@@ -270,13 +393,36 @@ class MainActivity : ComponentActivity() {
                                 return true // Return TRUE to prevent the WebView from loading the URL
                             }
 
-                            // 4. Check if the URL is the final deep link target (e.g., nearilappscheme://auth/...)
-                            if (uri.scheme == DEEP_LINK_SCHEME) {
-                                Log.i(TAG, "Allowing OS to resolve custom scheme URL: $url")
-                                return false
+                            // 5. FIX: Handle our own Custom Deep Link Scheme (nearilappscheme://)
+                            // This MUST return false so the OS routes it to the current activity's onNewIntent handler.
+                            if (scheme == DEEP_LINK_SCHEME) {
+                                Log.i(TAG, "Allowing OS to handle custom scheme: $url. Returning false.")
+                                return false 
                             }
 
-                            // 5. For all other URLs (e.g., https://nearil.com/about), let the WebView load it.
+                            // 6. Handle all other external links: Non-web schemes (mailto, tel, etc.)
+                            val isExternalLaunchRequired = when (scheme) {
+                                "http", "https" -> false // Let WebView handle standard web links
+                                else -> true // All non-web schemes (mailto, sms, tel, etc.) must be external
+                            }
+
+
+                            if (isExternalLaunchRequired) {
+                                Log.i(TAG, "Intercepted External Share/Non-Web Link: $url. Launching external OS handler.")
+                                
+                                // Create an intent to view the URI
+                                val intent = Intent(Intent.ACTION_VIEW, uri)
+                                
+                                if (intent.resolveActivity(view?.context?.packageManager!!) != null) {
+                                    view.context.startActivity(intent)
+                                } else {
+                                    Log.w(TAG, "No activity found to handle scheme for URL: $url")
+                                }
+                                
+                                return true // We handled the loading, prevent the WebView from trying
+                            }
+
+                            // 7. For all other standard http/https links, let the WebView load it.
                             return false
                         }
                     }

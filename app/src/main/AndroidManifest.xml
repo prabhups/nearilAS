@@ -4,6 +4,9 @@
     package="com.app.nearil">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
 
     <application
         android:allowBackup="true"
@@ -15,28 +18,35 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.NEARil"
         tools:targetApi="31">
-        <activity android:name=".MainActivity"
-            android:launchMode="singleTask"
-            android:exported="true">
-
-            <!-- Standard Filters for launching the app -->
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- CRITICAL: Android App Link (HTTPS) Filter -->
-            <!-- This filter MUST be added to intercept the final URL: https://nearil.com/app_auth_complete -->
+            <!-- App Links Intent Filter (REQUIRED FOR PRODUCTION) -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data
-                    android:scheme="https"
+
+                <!--
+                    MUST match your production domain and the AUTH_SUCCESS_PATH.
+                    The OS will use the assetlinks.json file to verify ownership of this link.
+                -->
+                <data android:scheme="https"
                     android:host="nearil.com"
                     android:pathPrefix="/app_auth_complete" />
             </intent-filter>
 
+            <!-- Custom Deep Link Scheme Intent Filter (Already in your setup) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="nearilappscheme"
+                    android:host="auth" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>
