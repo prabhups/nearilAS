@@ -1,5 +1,6 @@
 package com.app.nearil
 
+import android.app.Activity 
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -8,20 +9,25 @@ import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebChromeClient 
+import android.webkit.WebChromeClient
 import android.webkit.ValueCallback 
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback // New import for Activity-level back handling
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher 
 import androidx.activity.result.contract.ActivityResultContracts 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.Modifier
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.viewinterop.AndroidView
 import com.app.nearil.ui.theme.NEARilTheme
+import android.webkit.PermissionRequest // NEW IMPORT
 
 // Tag for logging deep link data
 private const val TAG = "MainActivity"
@@ -36,6 +42,10 @@ private const val DEEP_LINK_SCHEME = "nearilappscheme"
 private const val APP_LINK_HOST = "nearil.com"
 // The path must match the actual redirect URL path from your web app.
 private const val AUTH_SUCCESS_PATH = "/app_auth_complete"
+
+// Define the custom color outside the class
+// The HEX code #FFD700 is converted to a Compose Color
+val GoldColor = Color(0xFFD700) // The 0x is required for hex literal, and 0xFF is for the Alpha channel
 
 class MainActivity : ComponentActivity() {
 
@@ -52,6 +62,10 @@ class MainActivity : ComponentActivity() {
     
     // Modern way to handle Activity Results (replaces onActivityResult)
     private lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+
+    // --- NEW: Camera Permission Variables ---
+    private lateinit var permissionRequestLauncher: ActivityResultLauncher<String>
+    private var pendingPermissionRequest: PermissionRequest? = null
     // ------------------------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,16 +96,51 @@ class MainActivity : ComponentActivity() {
         }
         // ------------------------------------
 
+        // --- NEW: Camera Permission Launcher Registration ---
+        permissionRequestLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
+            // Check if the pending request is for the camera and was granted
+            if (isGranted && pendingPermissionRequest != null) {
+                pendingPermissionRequest?.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                Log.i(TAG, "Camera runtime permission granted by user. WebView access granted.")
+            } else {
+                // If not granted, deny the WebView request
+                pendingPermissionRequest?.deny()
+                Log.w(TAG, "Camera runtime permission denied by user.")
+            }
+            // Clear the pending request
+            pendingPermissionRequest = null
+        }
+        // ------------------------------------
+
         super.onCreate(savedInstanceState)
 
         // Process the initial intent (may contain a deep link from the OAuth flow)
         handleIntent(intent)
 
+        // --- CRITICAL FIX: Intercept the system back button globally at the Activity level ---
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // Check if the WebView object has been initialized and if it has history
+                if (::webView.isInitialized && webView.canGoBack()) {
+                    Log.i(TAG, "Activity Back Intercepted. Navigating WebView back.")
+                    // Go back in the WebView's history
+                    webView.goBack()
+                } else {
+                    Log.i(TAG, "Activity Back Intercepted. No WebView history, exiting app.")
+                    // If no history, finish the main Activity (exit the app)
+                    finish()
+                }
+            }
+        })
+        // --- END CRITICAL FIX ---
+
+
         setContent {
             NEARilTheme {
                 Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    modifier = Modifier.fillMaxSize().safeDrawingPadding(),
+                    // *** MODIFICATION 1: Set the background color here ***
+                    color = GoldColor 
                 ) {
                     // Start URL should be the primary entry point of your web app
                     WebViewScreen(initialUrl = "https://${APP_LINK_HOST}")
@@ -218,6 +267,9 @@ class MainActivity : ComponentActivity() {
     // Composable function to host the Android WebView
     @Composable
     fun WebViewScreen(initialUrl: String) {
+        // NOTE: The BackHandler logic has been moved to MainActivity.onCreate 
+        // using onBackPressedDispatcher for more robust handling.
+
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
@@ -232,12 +284,25 @@ class MainActivity : ComponentActivity() {
                     // Allow file access for camera/gallery intents
                     settings.allowFileAccess = true 
                     settings.allowContentAccess = true
+                    
+                    // *** CAMERA FIX INJECTION START ***
+                    // 1. Allow media (camera/mic) access without a user click requirement
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    
+                    // 2. Robust setting for accessing local files/resources, often needed for media streams
+                    settings.allowUniversalAccessFromFileURLs = true
+                    // *** CAMERA FIX INJECTION END ***
+
+                    // CRITICAL FIX: To prevent the WebView from showing a white background
+                    // while loading, set its background to the desired color.
+                    // *** MODIFICATION 2: Set the WebView background color (optional but recommended for a smooth look) ***
+                    setBackgroundColor(GoldColor.toArgb())
 
                     // 1. CRITICAL: Set a custom User-Agent string to help the Rails server reliably
                     // distinguish this request from a standard web browser request.
                     settings.userAgentString = settings.userAgentString + " NEARilApp_AndroidWebView/1.0"
 
-                    // 2. Store the WebView instance for later deep link handling
+                    // 2. Store the WebView instance for later deep link handling AND BackHandler access
                     this@MainActivity.webView = this
 
                     // Check for and process any pending deep links immediately after initialization.
@@ -250,15 +315,15 @@ class MainActivity : ComponentActivity() {
                         // Load the initial URL of your website only if no deep link was pending
                         loadUrl(initialUrl)
                     }
-                    
-                    // --- Implement WebChromeClient for File/Camera Access ---
+
+                    // --- Implement WebChromeClient for File/Camera Access and Permissions ---
                     webChromeClient = object : WebChromeClient() {
-                        
+
                         // This method is called when the web page wants to open a file chooser
                         override fun onShowFileChooser(
                             webView: WebView?,
                             filePathCallback: ValueCallback<Array<Uri>>?,
-                            fileChooserParams: FileChooserParams?
+                            fileChooserParams: WebChromeClient.FileChooserParams?
                         ): Boolean {
                             // 1. Check if there's already a pending callback (to prevent multiple choosers)
                             if (this@MainActivity.filePathCallback != null) {
@@ -292,6 +357,31 @@ class MainActivity : ComponentActivity() {
                         ) {
                             // NOTE: For production, you must implement a runtime permission check here.
                             callback?.invoke(origin, true, false)
+                        }
+
+                        // *** Handles permission requests from the web page (e.g., camera, microphone) ***
+                        override fun onPermissionRequest(request: PermissionRequest) {
+                            val resources = request.resources
+                            var needsCameraPermission = false
+
+                            for (resource in resources) {
+                                if (resource == PermissionRequest.RESOURCE_VIDEO_CAPTURE) {
+                                    needsCameraPermission = true
+                                    break
+                                }
+                            }
+
+                            if (needsCameraPermission) {
+                                // 1. Store the request to handle after the OS permission dialogue
+                                pendingPermissionRequest = request
+                                Log.i(TAG, "WebView requested Camera. Checking Android runtime permission...")
+
+                                // 2. Request the Android runtime permission
+                                permissionRequestLauncher.launch(android.Manifest.permission.CAMERA)
+                            } else {
+                                // If it's another permission or we don't handle it, use the default logic
+                                super.onPermissionRequest(request)
+                            }
                         }
                     }
                     // --- END WebChromeClient ---
