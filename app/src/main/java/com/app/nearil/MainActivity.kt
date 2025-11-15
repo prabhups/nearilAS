@@ -1,33 +1,38 @@
 package com.app.nearil
 
-import android.app.Activity 
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
+import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
-import android.webkit.ValueCallback 
 import androidx.activity.ComponentActivity
-import androidx.activity.OnBackPressedCallback // New import for Activity-level back handling
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
-import androidx.activity.result.ActivityResultLauncher 
-import androidx.activity.result.contract.ActivityResultContracts 
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.Modifier
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.viewinterop.AndroidView
 import com.app.nearil.ui.theme.NEARilTheme
-import android.webkit.PermissionRequest // NEW IMPORT
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import android.os.Environment
+import java.io.File
+import java.io.IOException
 
 // Tag for logging deep link data
 private const val TAG = "MainActivity"
@@ -62,53 +67,177 @@ class MainActivity : ComponentActivity() {
     
     // Modern way to handle Activity Results (replaces onActivityResult)
     private lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
-
-    // --- NEW: Camera Permission Variables ---
-    private lateinit var permissionRequestLauncher: ActivityResultLauncher<String>
+    private val PERMISSION_REQUEST_CODE = 101
     private var pendingPermissionRequest: PermissionRequest? = null
+    private var pendingFileChooserParams: WebChromeClient.FileChooserParams? = null
+    private var capturedImageUri: Uri? = null
     // ------------------------------------
+
+    private fun createImageFile(): File {
+        // Create an image file name
+        val timeStamp: String = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+        val storageDir: File? = getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES)
+
+        return File.createTempFile(
+            "JPEG_${timeStamp}_", /* prefix */
+            ".jpg", /* suffix */
+            storageDir /* directory */
+        ).apply {
+            // Log the file path for debugging
+            Log.d(TAG, "Created temp file path: $absolutePath")
+        }
+    }
+
+// Inside MainActivity class (outside of onCreate or composables)
+
+    /**
+     * Creates the temp file, builds the combined intent, and launches the chooser.
+     */
+    private fun launchCaptureIntent(fileChooserParams: WebChromeClient.FileChooserParams?) {
+        val context = this
+
+        // 1. Create a temporary file and get its URI
+        try {
+            val tempFile = createImageFile()
+            capturedImageUri = FileProvider.getUriForFile(
+                context,
+                "com.app.nearil.fileprovider", // MUST match the authority
+                tempFile
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating temporary file: ${e.message}. Cannot launch camera/chooser.")
+            filePathCallback?.onReceiveValue(null)
+            filePathCallback = null
+            return
+        }
+
+        // --- CRITICAL CHANGE: DIRECT CAMERA LAUNCH ---
+        if (fileChooserParams?.isCaptureEnabled == true) {
+            Log.i(TAG, "Capture enabled. Launching camera directly.")
+
+            // 2. Launch ONLY the Camera Intent
+            val cameraIntent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(android.provider.MediaStore.EXTRA_OUTPUT, capturedImageUri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+
+            try {
+                // Launching the camera intent directly
+                fileChooserLauncher.launch(cameraIntent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Cannot launch Camera: ${e.message}. Falling back to Chooser.")
+                // If the direct camera launch fails for some reason, we fall back to the chooser logic.
+                launchChooserFallback(fileChooserParams)
+            }
+
+        } else {
+            // If capture is NOT enabled (it's the gallery button), launch the standard chooser fallback.
+            Log.i(TAG, "Capture disabled. Launching standard chooser.")
+            launchChooserFallback(fileChooserParams)
+        }
+    }
+
+    /**
+     * Helper function to handle the standard file chooser/gallery launch logic.
+     */
+    private fun launchChooserFallback(fileChooserParams: WebChromeClient.FileChooserParams?) {
+        val contentSelectionIntent: Intent? = fileChooserParams?.createIntent()
+
+        if (contentSelectionIntent == null) {
+            Log.e(TAG, "File chooser intent was null.")
+            filePathCallback?.onReceiveValue(null)
+            filePathCallback = null
+            return
+        }
+
+        try {
+            // Launch the file chooser intent
+            fileChooserLauncher.launch(contentSelectionIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot launch file chooser: ${e.message}")
+            filePathCallback?.onReceiveValue(null)
+            filePathCallback = null
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            // Check if ALL native permissions were granted
+            val allPermissionsGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+
+            if (allPermissionsGranted) {
+                Log.i(TAG, "All necessary native permissions granted.")
+
+                // --- FIX FOR FILE CAPTURE BUTTONS: Relaunch the camera ---
+                if (pendingFileChooserParams != null) {
+                    Log.i(TAG, "Permissions granted. Completing file capture launch.")
+                    // Call the helper function to create the file, get the URI, and launch the camera
+                    launchCaptureIntent(pendingFileChooserParams)
+                    pendingFileChooserParams = null // Clear the state
+                }
+                // --------------------------------------------------------
+
+                // --- STANDARD WEBVIEW MEDIA STREAM GRANT ---
+                if (pendingPermissionRequest != null) {
+                    // This grants the stream access to the WebView (for live camera/mic)
+                    pendingPermissionRequest?.grant(pendingPermissionRequest!!.resources)
+                    pendingPermissionRequest = null
+                }
+
+            } else {
+                Log.w(TAG, "Native permissions denied. Denying WebView requests.")
+
+                // User denied permission, so we must signal failure to the WebView
+
+                // 1. Deny the media stream request (if pending)
+                if (pendingPermissionRequest != null) {
+                    pendingPermissionRequest?.deny()
+                    pendingPermissionRequest = null
+                }
+
+                // 2. Deny the file upload request (if pending)
+                if (filePathCallback != null) {
+                    filePathCallback?.onReceiveValue(null)
+                    filePathCallback = null
+                }
+                pendingFileChooserParams = null // Clear the state
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
 
         // --- File Chooser Launcher Registration (MUST be done before super.onCreate) ---
+// Inside onCreate:
+
         fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            // This logic handles the result from the file chooser intent
             var results: Array<Uri>? = null
 
-            // Check if the result is OK and data exists
             if (result.resultCode == RESULT_OK) {
                 result.data?.let { intent ->
-                    // Handle single file selection
+                    // Handle single/multiple file selection from GALLERY/FILES
                     if (intent.dataString != null) {
                         results = arrayOf(Uri.parse(intent.dataString))
-                    }
-                    // Handle multiple file selection (if supported by intent)
-                    else if (intent.clipData != null) {
+                    } else if (intent.clipData != null) {
                         val count = intent.clipData!!.itemCount
                         results = Array(count) { i -> intent.clipData!!.getItemAt(i).uri }
+                    }
+                } ?: run {
+                    // CRITICAL FIX: If result.data is null, check if we have a capturedImageUri
+                    if (capturedImageUri != null) {
+                        Log.i(TAG, "Captured image result received via EXTRA_OUTPUT URI.")
+                        results = arrayOf(capturedImageUri!!)
                     }
                 }
             }
 
             // Deliver the result (even if null/canceled) back to the WebView
             filePathCallback?.onReceiveValue(results)
-            filePathCallback = null // Clear the callback
-        }
-        // ------------------------------------
-
-        // --- NEW: Camera Permission Launcher Registration ---
-        permissionRequestLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
-            // Check if the pending request is for the camera and was granted
-            if (isGranted && pendingPermissionRequest != null) {
-                pendingPermissionRequest?.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
-                Log.i(TAG, "Camera runtime permission granted by user. WebView access granted.")
-            } else {
-                // If not granted, deny the WebView request
-                pendingPermissionRequest?.deny()
-                Log.w(TAG, "Camera runtime permission denied by user.")
-            }
-            // Clear the pending request
-            pendingPermissionRequest = null
+            filePathCallback = null
+            // Clear the stored temp URI regardless of success/failure
+            capturedImageUri = null
         }
         // ------------------------------------
 
@@ -138,7 +267,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             NEARilTheme {
                 Surface(
-                    modifier = Modifier.fillMaxSize().safeDrawingPadding(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
                     // *** MODIFICATION 1: Set the background color here ***
                     color = GoldColor 
                 ) {
@@ -267,8 +398,6 @@ class MainActivity : ComponentActivity() {
     // Composable function to host the Android WebView
     @Composable
     fun WebViewScreen(initialUrl: String) {
-        // NOTE: The BackHandler logic has been moved to MainActivity.onCreate 
-        // using onBackPressedDispatcher for more robust handling.
 
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -319,37 +448,116 @@ class MainActivity : ComponentActivity() {
                     // --- Implement WebChromeClient for File/Camera Access and Permissions ---
                     webChromeClient = object : WebChromeClient() {
 
-                        // This method is called when the web page wants to open a file chooser
+                    // This method is called when the web page wants to open a file chooser
                         override fun onShowFileChooser(
                             webView: WebView?,
                             filePathCallback: ValueCallback<Array<Uri>>?,
                             fileChooserParams: WebChromeClient.FileChooserParams?
                         ): Boolean {
-                            // 1. Check if there's already a pending callback (to prevent multiple choosers)
+                            // ... (Standard checks and storing callback) ...
                             if (this@MainActivity.filePathCallback != null) {
                                 this@MainActivity.filePathCallback!!.onReceiveValue(null)
                                 this@MainActivity.filePathCallback = null
                             }
-
-                            // 2. Store the new callback
                             this@MainActivity.filePathCallback = filePathCallback
 
-                            // 3. Create the Intent from the params provided by the WebView
-                            val intent = fileChooserParams?.createIntent()
-                            try {
-                                // 4. Launch the intent using the Activity Result Launcher
-                                fileChooserLauncher.launch(intent)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Cannot launch file chooser: ${e.message}")
-                                // If the launch fails, call the callback with null
-                                this@MainActivity.filePathCallback?.onReceiveValue(null)
-                                this@MainActivity.filePathCallback = null
-                                return false
+                            val contentSelectionIntent: Intent? = fileChooserParams?.createIntent()
+
+                            // --- CRITICAL IMPLEMENTATION START: Check for Capture Mode ---
+
+                            if (fileChooserParams?.isCaptureEnabled == true) {
+                                Log.i(TAG, "Capture mode requested. Checking necessary permissions.")
+
+                                // 1. Define the necessary permissions for the capture operation (Camera + conditional Storage)
+                                val requiredPermissions = mutableListOf<String>().apply {
+                                    add(Manifest.permission.CAMERA)
+                                    // Add Storage permission check for devices API 28 (Android 9) and below
+                                    if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
+                                        add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                    }
+                                }
+
+                                // 2. Identify permissions that are NOT granted
+                                val notGrantedPermissions = requiredPermissions.filter {
+                                    ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+                                }
+
+                                // 3. If any required permission is missing, invoke the Android UI
+                                if (notGrantedPermissions.isNotEmpty()) {
+                                    // Store the parameters needed to re-launch the intent later
+                                    this@MainActivity.pendingFileChooserParams = fileChooserParams // <-- NEW LINE
+
+                                    Log.w(TAG, "Missing permissions detected. Requesting Android runtime dialog.")
+                                    this@MainActivity.requestPermissions(
+                                        notGrantedPermissions.toTypedArray(),
+                                        PERMISSION_REQUEST_CODE
+                                    )
+                                    return true
+                                }
+
+                                // --- 4. If all permissions are granted, proceed with file creation and intent launch ---
+
+                                // 4a. Create a temporary file and get its URI
+                                try {
+                                    val tempFile = createImageFile()
+                                    capturedImageUri = FileProvider.getUriForFile(
+                                        this@MainActivity,
+                                        "com.app.nearil.fileprovider",
+                                        tempFile
+                                    )
+                                } catch (e: Exception) {
+                                    // This catch block is now primarily for unexpected IO issues, NOT permission denial
+                                    Log.e(TAG, "Error creating temporary file: ${e.message}")
+                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                    this@MainActivity.filePathCallback = null
+                                    return false
+                                }
+
+                                // 4b. Create Camera Intent and combine with file chooser intent
+                                val cameraIntent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                                    putExtra(android.provider.MediaStore.EXTRA_OUTPUT, capturedImageUri)
+                                    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                                }
+
+                                val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
+                                    putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
+                                    putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraIntent))
+                                    putExtra(Intent.EXTRA_TITLE, "Select Image or Take Photo")
+                                }
+
+                                try {
+                                    // 4c. Launch the combined chooser intent
+                                    fileChooserLauncher.launch(chooserIntent)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Cannot launch combined chooser: ${e.message}")
+                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                    this@MainActivity.filePathCallback = null
+                                    return false
+                                }
+
+                            } else {
+                                // --- Standard File Chooser (Your Second Control) ---
+                                // ... (Logic for launching non-capture intents remains here) ...
+                                if (contentSelectionIntent != null) {
+                                    try {
+                                        fileChooserLauncher.launch(contentSelectionIntent)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Cannot launch file chooser: ${e.message}")
+                                        this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                        this@MainActivity.filePathCallback = null
+                                        return false
+                                    }
+                                } else {
+                                    Log.e(TAG, "File chooser intent was null.")
+                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                    this@MainActivity.filePathCallback = null
+                                    return false
+                                }
                             }
+                            // --- CRITICAL IMPLEMENTATION END ---
 
-                            return true // Indicate that we handled the file chooser request
+                            return true
                         }
-
                         // Also include onGeolocationPermissionsShowPrompt for completeness if location is ever needed
                         override fun onGeolocationPermissionsShowPrompt(
                             origin: String?,
@@ -359,33 +567,83 @@ class MainActivity : ComponentActivity() {
                             callback?.invoke(origin, true, false)
                         }
 
+                        private fun hasAllPermissionsGranted(): Boolean {
+                            val cameraPermission = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.CAMERA
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                            val audioPermission = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                            // CRITICAL: Check for legacy WRITE_EXTERNAL_STORAGE permission
+                            val storagePermission = if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                                ) == PackageManager.PERMISSION_GRANTED
+                            } else {
+                                // On modern APIs (10+), WRITE_EXTERNAL_STORAGE is not needed for getExternalFilesDir()
+                                true
+                            }
+
+                            return cameraPermission && audioPermission && storagePermission
+                        }
+
                         // *** Handles permission requests from the web page (e.g., camera, microphone) ***
                         override fun onPermissionRequest(request: PermissionRequest) {
+
+                            // Check if the request is for camera or microphone access
                             val resources = request.resources
-                            var needsCameraPermission = false
+                            var grantCamera = false
+                            var grantMicrophone = false
 
                             for (resource in resources) {
                                 if (resource == PermissionRequest.RESOURCE_VIDEO_CAPTURE) {
-                                    needsCameraPermission = true
-                                    break
+                                    grantCamera = true
+                                } else if (resource == PermissionRequest.RESOURCE_AUDIO_CAPTURE) {
+                                    grantMicrophone = true
                                 }
                             }
 
-                            if (needsCameraPermission) {
-                                // 1. Store the request to handle after the OS permission dialogue
-                                pendingPermissionRequest = request
-                                Log.i(TAG, "WebView requested Camera. Checking Android runtime permission...")
+                            if (grantCamera || grantMicrophone) {
+                                this@MainActivity.pendingPermissionRequest = request
 
-                                // 2. Request the Android runtime permission
-                                permissionRequestLauncher.launch(android.Manifest.permission.CAMERA)
+                                val requiredPermissions = mutableListOf<String>()
+
+                                // 1. Add WebView's direct requests
+                                if (grantCamera) requiredPermissions.add(Manifest.permission.CAMERA)
+                                if (grantMicrophone) requiredPermissions.add(Manifest.permission.RECORD_AUDIO)
+
+                                // 2. CRITICAL FIX: Conditionally add WRITE_EXTERNAL_STORAGE
+                                // This is required for FileProvider/temp file creation on legacy devices (API 28 and below)
+                                if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
+                                    requiredPermissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                }
+
+                                // Check native Android permissions
+                                val notGrantedPermissions = requiredPermissions.filter {
+                                    ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+                                }
+
+                                if (notGrantedPermissions.isEmpty()) {
+                                    // Already granted natively, proceed immediately
+                                    request.grant(request.resources)
+                                } else {
+                                    // Request native permissions from the user
+                                    requestPermissions(
+                                        notGrantedPermissions.toTypedArray(),
+                                        PERMISSION_REQUEST_CODE
+                                    )
+                                }
                             } else {
-                                // If it's another permission or we don't handle it, use the default logic
                                 super.onPermissionRequest(request)
                             }
                         }
                     }
                     // --- END WebChromeClient ---
-
 
                     // 3. Implement the custom WebViewClient to intercept OAuth URLs and App Links
                     webViewClient = object : WebViewClient() {
