@@ -33,6 +33,8 @@ import androidx.core.content.FileProvider
 import android.os.Environment
 import java.io.File
 import java.io.IOException
+import androidx.core.app.ActivityCompat
+import android.webkit.GeolocationPermissions
 
 // Tag for logging deep link data
 private const val TAG = "MainActivity"
@@ -170,6 +172,12 @@ class MainActivity : ComponentActivity() {
             if (allPermissionsGranted) {
                 Log.i(TAG, "All necessary native permissions granted.")
 
+                if (permissions.contains(Manifest.permission.ACCESS_FINE_LOCATION)) {
+                    Log.i(TAG, "Location permission granted by user. Reloading page to trigger GPS.")
+                    // To force the browser to pick up the new hardware permission,
+                    // it is often safest to refresh or call your JS function.
+                    webView.loadUrl("javascript:findUserLocation();")
+                }
                 // --- FIX FOR FILE CAPTURE BUTTONS: Relaunch the camera ---
                 if (pendingFileChooserParams != null) {
                     Log.i(TAG, "Permissions granted. Completing file capture launch.")
@@ -431,6 +439,10 @@ class MainActivity : ComponentActivity() {
                     // distinguish this request from a standard web browser request.
                     settings.userAgentString = settings.userAgentString + " NEARilApp_AndroidWebView/1.0"
 
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.setGeolocationEnabled(true)
+
                     // 2. Store the WebView instance for later deep link handling AND BackHandler access
                     this@MainActivity.webView = this
 
@@ -558,13 +570,31 @@ class MainActivity : ComponentActivity() {
 
                             return true
                         }
-                        // Also include onGeolocationPermissionsShowPrompt for completeness if location is ever needed
+
                         override fun onGeolocationPermissionsShowPrompt(
                             origin: String?,
-                            callback: android.webkit.GeolocationPermissions.Callback?
+                            callback: GeolocationPermissions.Callback?
                         ) {
-                            // NOTE: For production, you must implement a runtime permission check here.
-                            callback?.invoke(origin, true, false)
+                            val locationPermission = Manifest.permission.ACCESS_FINE_LOCATION
+
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, locationPermission) == PackageManager.PERMISSION_GRANTED) {
+                                // CASE 1: App already has OS permission
+                                Log.i(TAG, "Location permission already granted for $origin")
+                                callback?.invoke(origin, true, false)
+                            } else {
+                                // CASE 2: App needs to ask the user
+                                Log.i(TAG, "Requesting Location permission from OS for $origin")
+
+                                // We invoke the callback with 'true' to tell the WebView "We are handling it"
+                                // The actual location won't be sent until the OS permission is granted.
+                                callback?.invoke(origin, true, false)
+
+                                ActivityCompat.requestPermissions(
+                                    this@MainActivity,
+                                    arrayOf(locationPermission),
+                                    PERMISSION_REQUEST_CODE
+                                )
+                            }
                         }
 
                         private fun hasAllPermissionsGranted(): Boolean {
