@@ -11,8 +11,8 @@ android {
         applicationId = "com.app.nearil"
         minSdk = 24
         targetSdk = 36
-        versionCode = 6
-        versionName = "6.0.0"
+        versionCode = 9
+        versionName = "1.0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

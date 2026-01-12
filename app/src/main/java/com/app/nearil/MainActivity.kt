@@ -50,6 +50,9 @@ private const val APP_LINK_HOST = "nearil.com"
 // The path must match the actual redirect URL path from your web app.
 private const val AUTH_SUCCESS_PATH = "/app_auth_complete"
 
+private var startUrl: String? = null
+private var pendingSharedImageUri: Uri? = null
+
 // Define the custom color outside the class
 // The HEX code #FFD700 is converted to a Compose Color
 val GoldColor = Color(0xFFD700) // The 0x is required for hex literal, and 0xFF is for the Alpha channel
@@ -275,14 +278,16 @@ class MainActivity : ComponentActivity() {
         setContent {
             NEARilTheme {
                 Surface(
+                    // Restoring the layout modifiers
                     modifier = Modifier
                         .fillMaxSize()
                         .safeDrawingPadding(),
-                    // *** MODIFICATION 1: Set the background color here ***
-                    color = GoldColor 
+                    // Keeping your gold background color
+                    color = GoldColor
                 ) {
-                    // Start URL should be the primary entry point of your web app
-                    WebViewScreen(initialUrl = "https://${APP_LINK_HOST}")
+                    // Use the deep link URL if we have one, otherwise use the home host
+                    val initialUrlToLoad = startUrl ?: "https://${APP_LINK_HOST}"
+                    WebViewScreen(initialUrl = initialUrlToLoad)
                 }
             }
         }
@@ -303,26 +308,44 @@ class MainActivity : ComponentActivity() {
      * Extracts and processes the deep link data for both HTTPS App Links and Custom Schemes.
      */
     private fun handleIntent(intent: Intent?) {
-        if (intent == null || intent.data == null) {
-            Log.d(TAG, "No deep link data found.")
+        if (intent == null) return
+
+        val action = intent.action
+        val type = intent.type
+
+        // --- CASE 1: Handle Image Sharing from Gallery (ACTION_SEND) ---
+        if (Intent.ACTION_SEND == action && type?.startsWith("image/") == true) {
+            val imageUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            if (imageUri != null) {
+                Log.i(TAG, "Shared Image Received: $imageUri")
+
+                // Set the URL to the Rails 'new pin' page
+                val shareUrl = "https://$APP_LINK_HOST/pins/new?shared_image=true"
+
+                if (::webView.isInitialized) {
+                    pendingSharedImageUri = imageUri // Store for the FileChooser
+                    runOnUiThread { webView.loadUrl(shareUrl) }
+                } else {
+                    startUrl = shareUrl
+                    pendingSharedImageUri = imageUri
+                }
+            }
             return
         }
 
-        val appLinkAction = intent.action
+        // --- CASE 2: Handle Deep Links & Auth (ACTION_VIEW) ---
         val appLinkData = intent.data
-
-        if (Intent.ACTION_VIEW == appLinkAction && appLinkData != null) {
+        if (Intent.ACTION_VIEW == action && appLinkData != null) {
             val fullUri = appLinkData.toString()
-            Log.i(TAG, "Deep Link Caught: $fullUri")
-
             val scheme = appLinkData.scheme
             val host = appLinkData.host
             val path = appLinkData.path
 
-            // Check if the URI is the success/failure path for EITHER the HTTPS App Link OR the Custom Scheme.
-            val isAuthRedirect =
-                (scheme == "https" && host == APP_LINK_HOST && path?.startsWith(AUTH_SUCCESS_PATH) == true) ||
-                        (scheme == DEEP_LINK_SCHEME)
+            Log.i(TAG, "Deep Link Caught: $fullUri")
+
+            // 1. Auth Redirect Logic
+            val isAuthRedirect = (scheme == "https" && host == APP_LINK_HOST && path?.startsWith(AUTH_SUCCESS_PATH) == true) ||
+                    (scheme == DEEP_LINK_SCHEME)
 
             if (isAuthRedirect) {
                 if (isAuthProcessing) {
@@ -330,36 +353,35 @@ class MainActivity : ComponentActivity() {
                     return
                 }
 
-                // CHECK 1: If WebView is initialized, process it immediately.
                 if (::webView.isInitialized) {
                     processAuthDeepLink(appLinkData)
                 } else {
-                    // WebView not yet initialized, store the URI and wait.
-                    Log.w(TAG, "WebView not yet initialized, storing deep link: $fullUri for later processing.")
                     pendingDeepLinkUri = appLinkData
                 }
 
-                // CRITICAL FIX: Clear the Intent data after processing to prevent
-                // re-processing if the Activity is paused and resumed.
                 intent.data = null
                 setIntent(intent)
-
-                // If the Auth Link was processed or stored, we are done.
                 return
             }
 
-            // --- Fallback: If it's another deep link we need to process (e.g., product/profile link) ---
-            if (::webView.isInitialized) {
-                // Load it in the WebView
-                runOnUiThread {
-                    webView.loadUrl(fullUri)
+            // 2. Pins Redirect Logic
+            if (path?.contains("/pins/") == true) {
+                if (::webView.isInitialized) {
+                    runOnUiThread { webView.loadUrl(fullUri) }
+                } else {
+                    startUrl = fullUri
                 }
+                return
+            }
+
+            // 3. Fallback for other web links
+            if (::webView.isInitialized) {
+                runOnUiThread { webView.loadUrl(fullUri) }
             } else {
-                Log.w(TAG, "WebView not yet initialized, cannot load deep link: $fullUri")
+                startUrl = fullUri
             }
         }
     }
-
     /**
      * Handles the successful or failed authentication deep link URI and redirects the WebView.
      */
@@ -461,115 +483,118 @@ class MainActivity : ComponentActivity() {
                     webChromeClient = object : WebChromeClient() {
 
                     // This method is called when the web page wants to open a file chooser
-                        override fun onShowFileChooser(
-                            webView: WebView?,
-                            filePathCallback: ValueCallback<Array<Uri>>?,
-                            fileChooserParams: WebChromeClient.FileChooserParams?
-                        ): Boolean {
-                            // ... (Standard checks and storing callback) ...
-                            if (this@MainActivity.filePathCallback != null) {
-                                this@MainActivity.filePathCallback!!.onReceiveValue(null)
-                                this@MainActivity.filePathCallback = null
-                            }
-                            this@MainActivity.filePathCallback = filePathCallback
+                    override fun onShowFileChooser(
+                        webView: WebView?,
+                        filePathCallback: ValueCallback<Array<Uri>>?,
+                        fileChooserParams: WebChromeClient.FileChooserParams?
+                    ): Boolean {
+                        // 1. Priority Check: If we have an image shared from an external app (Gallery Share)
+                        if (pendingSharedImageUri != null) {
+                            filePathCallback?.onReceiveValue(arrayOf(pendingSharedImageUri!!))
+                            pendingSharedImageUri = null
 
-                            val contentSelectionIntent: Intent? = fileChooserParams?.createIntent()
-
-                            // --- CRITICAL IMPLEMENTATION START: Check for Capture Mode ---
-
-                            if (fileChooserParams?.isCaptureEnabled == true) {
-                                Log.i(TAG, "Capture mode requested. Checking necessary permissions.")
-
-                                // 1. Define the necessary permissions for the capture operation (Camera + conditional Storage)
-                                val requiredPermissions = mutableListOf<String>().apply {
-                                    add(Manifest.permission.CAMERA)
-                                    // Add Storage permission check for devices API 28 (Android 9) and below
-                                    if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
-                                        add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                                    }
-                                }
-
-                                // 2. Identify permissions that are NOT granted
-                                val notGrantedPermissions = requiredPermissions.filter {
-                                    ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
-                                }
-
-                                // 3. If any required permission is missing, invoke the Android UI
-                                if (notGrantedPermissions.isNotEmpty()) {
-                                    // Store the parameters needed to re-launch the intent later
-                                    this@MainActivity.pendingFileChooserParams = fileChooserParams // <-- NEW LINE
-
-                                    Log.w(TAG, "Missing permissions detected. Requesting Android runtime dialog.")
-                                    this@MainActivity.requestPermissions(
-                                        notGrantedPermissions.toTypedArray(),
-                                        PERMISSION_REQUEST_CODE
-                                    )
-                                    return true
-                                }
-
-                                // --- 4. If all permissions are granted, proceed with file creation and intent launch ---
-
-                                // 4a. Create a temporary file and get its URI
-                                try {
-                                    val tempFile = createImageFile()
-                                    capturedImageUri = FileProvider.getUriForFile(
-                                        this@MainActivity,
-                                        "com.app.nearil.fileprovider",
-                                        tempFile
-                                    )
-                                } catch (e: Exception) {
-                                    // This catch block is now primarily for unexpected IO issues, NOT permission denial
-                                    Log.e(TAG, "Error creating temporary file: ${e.message}")
-                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                                    this@MainActivity.filePathCallback = null
-                                    return false
-                                }
-
-                                // 4b. Create Camera Intent and combine with file chooser intent
-                                val cameraIntent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
-                                    putExtra(android.provider.MediaStore.EXTRA_OUTPUT, capturedImageUri)
-                                    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                                }
-
-                                val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
-                                    putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
-                                    putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraIntent))
-                                    putExtra(Intent.EXTRA_TITLE, "Select Image or Take Photo")
-                                }
-
-                                try {
-                                    // 4c. Launch the combined chooser intent
-                                    fileChooserLauncher.launch(chooserIntent)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Cannot launch combined chooser: ${e.message}")
-                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                                    this@MainActivity.filePathCallback = null
-                                    return false
-                                }
-
-                            } else {
-                                // --- Standard File Chooser (Your Second Control) ---
-                                // ... (Logic for launching non-capture intents remains here) ...
-                                if (contentSelectionIntent != null) {
-                                    try {
-                                        fileChooserLauncher.launch(contentSelectionIntent)
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Cannot launch file chooser: ${e.message}")
-                                        this@MainActivity.filePathCallback?.onReceiveValue(null)
-                                        this@MainActivity.filePathCallback = null
-                                        return false
-                                    }
-                                } else {
-                                    Log.e(TAG, "File chooser intent was null.")
-                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
-                                    this@MainActivity.filePathCallback = null
-                                    return false
-                                }
-                            }
-                            // --- CRITICAL IMPLEMENTATION END ---
+                            // --- NEW BRIDGE TRIGGER ---
+                            // Wait 500ms for the WebView to process the file, then call the JS function
+                            webView?.postDelayed({
+                                webView.evaluateJavascript("window.loadSharedImage();", null)
+                            }, 500)
 
                             return true
                         }
+
+                        // --- Standard checks and storing callback ---
+                        if (this@MainActivity.filePathCallback != null) {
+                            this@MainActivity.filePathCallback!!.onReceiveValue(null)
+                            this@MainActivity.filePathCallback = null
+                        }
+                        this@MainActivity.filePathCallback = filePathCallback
+
+                        val contentSelectionIntent: Intent? = fileChooserParams?.createIntent()
+
+                        // --- CRITICAL IMPLEMENTATION START: Check for Capture Mode ---
+
+                        if (fileChooserParams?.isCaptureEnabled == true) {
+                            Log.i(TAG, "Capture mode requested. Checking necessary permissions.")
+
+                            // 1. Define the necessary permissions
+                            val requiredPermissions = mutableListOf<String>().apply {
+                                add(Manifest.permission.CAMERA)
+                                if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
+                                    add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                }
+                            }
+
+                            // 2. Identify permissions that are NOT granted
+                            val notGrantedPermissions = requiredPermissions.filter {
+                                ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
+                            }
+
+                            // 3. If any required permission is missing, invoke the Android UI
+                            if (notGrantedPermissions.isNotEmpty()) {
+                                this@MainActivity.pendingFileChooserParams = fileChooserParams
+                                Log.w(TAG, "Missing permissions detected. Requesting Android runtime dialog.")
+                                this@MainActivity.requestPermissions(
+                                    notGrantedPermissions.toTypedArray(),
+                                    PERMISSION_REQUEST_CODE
+                                )
+                                return true
+                            }
+
+                            // --- 4. Proceed with file creation and intent launch ---
+                            try {
+                                val tempFile = createImageFile()
+                                capturedImageUri = FileProvider.getUriForFile(
+                                    this@MainActivity,
+                                    "com.app.nearil.fileprovider",
+                                    tempFile
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error creating temporary file: ${e.message}")
+                                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                this@MainActivity.filePathCallback = null
+                                return false
+                            }
+
+                            val cameraIntent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                                putExtra(android.provider.MediaStore.EXTRA_OUTPUT, capturedImageUri)
+                                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                            }
+
+                            val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
+                                putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
+                                putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cameraIntent))
+                                putExtra(Intent.EXTRA_TITLE, "Select Image or Take Photo")
+                            }
+
+                            try {
+                                fileChooserLauncher.launch(chooserIntent)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Cannot launch combined chooser: ${e.message}")
+                                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                this@MainActivity.filePathCallback = null
+                                return false
+                            }
+
+                        } else {
+                            // --- Standard File Chooser ---
+                            if (contentSelectionIntent != null) {
+                                try {
+                                    fileChooserLauncher.launch(contentSelectionIntent)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Cannot launch file chooser: ${e.message}")
+                                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                    this@MainActivity.filePathCallback = null
+                                    return false
+                                }
+                            } else {
+                                Log.e(TAG, "File chooser intent was null.")
+                                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                                this@MainActivity.filePathCallback = null
+                                return false
+                            }
+                        }
+                        return true
+                    }
 
                         override fun onGeolocationPermissionsShowPrompt(
                             origin: String?,
