@@ -365,21 +365,21 @@ class MainActivity : ComponentActivity() {
             }
 
             // 2. Pins Redirect Logic
-            if (path?.contains("/pins/") == true) {
+            //if (path?.contains("/pins/") == true) {
                 if (::webView.isInitialized) {
                     runOnUiThread { webView.loadUrl(fullUri) }
                 } else {
                     startUrl = fullUri
                 }
                 return
-            }
+            //}
 
             // 3. Fallback for other web links
-            if (::webView.isInitialized) {
-                runOnUiThread { webView.loadUrl(fullUri) }
-            } else {
-                startUrl = fullUri
-            }
+            //if (::webView.isInitialized) {
+            //    runOnUiThread { webView.loadUrl(fullUri) }
+            //} else {
+            //    startUrl = fullUri
+            //}
         }
     }
     /**
