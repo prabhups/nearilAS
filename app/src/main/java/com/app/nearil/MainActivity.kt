@@ -364,22 +364,22 @@ class MainActivity : ComponentActivity() {
                 return
             }
 
-            // 2. Pins Redirect Logic
-            //if (path?.contains("/pins/") == true) {
+            // 2. Pins / Street Details Redirect Logic
+            if (path?.contains("/pins/") == true || path?.contains("/street_details/") == true) {
                 if (::webView.isInitialized) {
                     runOnUiThread { webView.loadUrl(fullUri) }
                 } else {
                     startUrl = fullUri
                 }
                 return
-            //}
+            }
 
             // 3. Fallback for other web links
-            //if (::webView.isInitialized) {
-            //    runOnUiThread { webView.loadUrl(fullUri) }
-            //} else {
-            //    startUrl = fullUri
-            //}
+            if (::webView.isInitialized) {
+                runOnUiThread { webView.loadUrl(fullUri) }
+            } else {
+                startUrl = fullUri
+            }
         }
     }
     /**

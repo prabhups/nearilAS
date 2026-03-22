@@ -58,7 +58,11 @@
                 <category android:name="android.intent.category.BROWSABLE" />
 
                 <data android:scheme="https"
-                    android:host="nearil.com" />
+                    android:host="nearil.com"
+                    android:pathPrefix="/pins/" />
+                <data android:scheme="https"
+                    android:host="nearil.com"
+                    android:pathPrefix="/street_details/" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
