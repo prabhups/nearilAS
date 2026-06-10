@@ -5,12 +5,14 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.content.ContentValues
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -30,9 +32,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
+import android.util.Base64
 import java.io.File
-import java.io.IOException
 import androidx.core.app.ActivityCompat
 import android.webkit.GeolocationPermissions
 
@@ -77,6 +81,62 @@ class MainActivity : ComponentActivity() {
     private var pendingFileChooserParams: WebChromeClient.FileChooserParams? = null
     private var capturedImageUri: Uri? = null
     // ------------------------------------
+
+    private inner class NearilJsBridge {
+        @JavascriptInterface
+        fun saveImageToNearilFolder(fileName: String, base64Payload: String) {
+            try {
+                val cleanName = if (fileName.endsWith(".jpg", ignoreCase = true)) fileName else "$fileName.jpg"
+                val imageBytes = Base64.decode(base64Payload, Base64.DEFAULT)
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val resolver = contentResolver
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, cleanName)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/nearil")
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+
+                    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    if (uri == null) {
+                        Log.e(TAG, "Failed to create MediaStore record for Nearil image.")
+                        return
+                    }
+
+                    resolver.openOutputStream(uri)?.use { stream ->
+                        stream.write(imageBytes)
+                    }
+
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    Log.i(TAG, "Saved image to gallery: $uri")
+                } else {
+                    val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                    val nearilDir = File(picturesDir, "NEARil")
+                    if (!nearilDir.exists()) {
+                        nearilDir.mkdirs()
+                    }
+
+                    val imageFile = File(nearilDir, cleanName)
+                    imageFile.outputStream().use { stream ->
+                        stream.write(imageBytes)
+                    }
+
+                    android.media.MediaScannerConnection.scanFile(
+                        this@MainActivity,
+                        arrayOf(imageFile.absolutePath),
+                        arrayOf("image/jpeg"),
+                        null
+                    )
+                    Log.i(TAG, "Saved image to legacy gallery path: ${imageFile.absolutePath}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "saveImageToNearilFolder failed: ${e.message}", e)
+            }
+        }
+    }
 
     private fun createImageFile(): File {
         // Create an image file name
@@ -464,6 +524,8 @@ class MainActivity : ComponentActivity() {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.setGeolocationEnabled(true)
+
+                    addJavascriptInterface(NearilJsBridge(), "NearilAndroid")
 
                     // 2. Store the WebView instance for later deep link handling AND BackHandler access
                     this@MainActivity.webView = this
